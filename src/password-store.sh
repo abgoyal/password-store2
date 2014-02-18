@@ -11,7 +11,7 @@ GIT_DIR="${PASSWORD_STORE_GIT:-$PREFIX}/.git"
 GPG_OPTS="--quiet --yes --batch"
 
 SALTFILE="$PREFIX/.salt"
-[[ -f $SALTFILE ]] && SALT=$(cat $SALTFILE)
+[[ -f $SALTFILE ]] && SALT=$(gpg2 -d $GPG_OPTS "$SALTFILE")
 
 export GIT_DIR
 export GIT_WORK_TREE="${PASSWORD_STORE_GIT:-$PREFIX}"
@@ -202,7 +202,7 @@ ref2name() {
 	echo "$clearref"
 }
 
-clearpath2() {
+clearpath() {
 	p="^(.*)($PREFIX/.*)$"
 	while read line
 	do
@@ -244,8 +244,8 @@ case "$command" in
 
 		gpg_id="$1"
 		mkdir -v -p "$PREFIX"
-		echo "$gpg_id" > "$ID"
-        gpg --armor --gen-random 0 60 > "$SALTFILE"
+		gpg2 -e -r "$gpg_id" -o "$ID" $GPG_OPTS <<<"$gpg_id" 
+        gpg2 --armor --gen-random 0 60 | gpg2 -e -r "$gpg_id" -o "$SALTFILE" $GPG_OPTS 
 		echo "Password store initialized for $gpg_id."
 		git_add_file "$ID" "Set GPG id to $gpg_id."
 
@@ -278,7 +278,7 @@ elif [[ ! -f $ID ]]; then
 	usage
 	exit 1
 else
-	ID="$(head -n 1 "$ID")"
+	ID="$(cat "$ID" | gpg2 -d $GPG_OPTS | head -n 1)"
 fi
 
 case "$command" in
@@ -326,7 +326,7 @@ case "$command" in
 			else
 				echo "${path%\/}"
 			fi
-			tree -A -d -l -f --noreport "$ref_fullpath" | tail -n +2 | clearpath2
+			tree -A -d -l -f --noreport "$ref_fullpath" | tail -n +2 | clearpath
 		else
 			echo "$path is not in the password store."
 			exit 1

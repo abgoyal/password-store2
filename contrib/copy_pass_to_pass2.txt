@@ -1,0 +1,9 @@
+pushd cd .password-store
+find -iname '*.gpg' | sed 's/\.\/\(.*\).gpg/\1/' | xargs -d "\n" -n 1 p2p.sh
+popd
+
+
+p2p.sh:
+
+pass "$1" | pass2 insert  -f -m "$1"
+
