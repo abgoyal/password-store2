@@ -4,23 +4,17 @@
 # Brian Mattern <rephorm@rephorm.com>. All Rights Reserved.
 # This file is licensed under the GPLv2+. Please see COPYING for more information.
 
-_pass_complete_entries () {
-	prefix="${PASSWORD_STORE_DIR:-$HOME/.password-store/}"
-	suffix=".gpg"
+_pass2_complete_entries () {
 	autoexpand=${1:-0}
 
 	local IFS=$'\n'
-	local items=($(compgen -f $prefix$cur))
+	local items=($(${COMP_WORDS[0]} cplt "${COMP_WORDS[COMP_CWORD]}"))
 	for item in ${items[@]}; do
-		if [[ $item == $prefix.* ]]; then
-			continue
-		fi
-
 		# if there is a unique match, and it is a directory with one entry
 		# autocomplete the subentry as well (recursively)
 		if [[ ${#items[@]} -eq 1 && $autoexpand -eq 1 ]]; then
 			while [[ -d $item ]]; do
-				local subitems=($(compgen -f "$item/"))
+				local subitems=($("${COMP_WORDS[0]}" cplt $item))
 				if [[ ${#subitems[@]} -eq 1 ]]; then
 					item="${subitems[0]}"
 				else
@@ -29,22 +23,18 @@ _pass_complete_entries () {
 			done
 		fi
 
-		# append / to directories
-		[[ -d $item ]] && item="$item/"
-
-		item="${item%$suffix}"
-		COMPREPLY+=("${item#$prefix}")
+		COMPREPLY+=("${item}")
 	done
 }
 
-_pass_complete_keys () {
+_pass2_complete_keys () {
 	local IFS=$'\n'
 	# Extract names and email addresses from gpg --list-keys
 	local keys="$(gpg2 --list-secret-keys --with-colons | cut -d : -f 10 | sort -u | sed '/^$/d')"
 	COMPREPLY+=($(compgen -W "${keys}" -- ${cur}))
 }
 
-_pass()
+_pass2()
 {
 	COMPREPLY=()
 	local cur="${COMP_WORDS[COMP_CWORD]}"
@@ -84,4 +74,4 @@ _pass()
 	fi
 }
 
-complete -o filenames -o nospace -F _pass pass
+complete  -o nospace -F _pass2 pass2

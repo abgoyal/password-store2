@@ -5,10 +5,13 @@
 
 umask 077
 
-PREFIX="${PASSWORD_STORE_DIR:-$HOME/.password-store}"
+PREFIX="${PASSWORD_STORE_DIR:-$HOME/.password-store2}"
 ID="$PREFIX/.gpg-id"
 GIT_DIR="${PASSWORD_STORE_GIT:-$PREFIX}/.git"
 GPG_OPTS="--quiet --yes --batch"
+
+SALTFILE="$PREFIX/.salt"
+[[ -f $SALTFILE ]] && SALT=$(cat $SALTFILE)
 
 export GIT_DIR
 export GIT_WORK_TREE="${PASSWORD_STORE_GIT:-$PREFIX}"
@@ -63,7 +66,7 @@ _EOF
 }
 is_command() {
 	case "$1" in
-		init|ls|list|show|insert|edit|generate|remove|rm|delete|git|help|--help|version|--version) return 0 ;;
+		init|ls|list|show|insert|edit|generate|remove|rm|delete|git|help|cplt|--help|version|--version) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -125,6 +128,94 @@ GETOPT="getopt"
 #
 # END Platform definable
 #
+declare -a parts
+
+pathsplit() {
+	parts=()
+	p="$1"
+	while [[ ! "${p}" == "." ]]
+	do
+		dir="$(dirname "$p")"
+		base="$(basename "$p")"
+		parts=("$base" "${parts[@]}")
+		p="$dir"
+	done
+}
+
+str2ref() {
+	sha512sum <<<"$SALT$1$SALT" | head -c 64
+}
+
+
+get_refpath() {
+	[[ -z $1 ]] && return
+	r=""
+	relpath="${1#$PREFIX/}"
+	pathsplit "$relpath" # sets "parts"
+	for i in "${parts[@]}"
+	do
+		c="$(str2ref "$i").ref"
+		if [[ -z $r ]]
+		then 
+			r="$c"
+		else
+			r="$r/$c"
+		fi
+	done
+	echo "$r"
+}
+
+get_reffile() {
+	c=$(get_refpath "$1")
+	echo "${PREFIX}/${c}/$(basename "$c").gpg"
+}
+
+make_parent_refs() {
+	relpath="${1#$PREFIX/}"
+	pathsplit "$relpath" # sets "parts"
+	r="$PREFIX"
+	for i in "${parts[@]}"
+	do
+		c="$(str2ref "$i").ref"
+		r="$r/$c"
+		[[ -d $r ]] || mkdir -v -p "$r"
+		[[ -f "$r/$c" ]] || gpg2 -e -r "$ID" -o "$r/$c" $GPG_OPTS <<<"$i"   
+	done
+}
+
+ref2name() {
+	relpath="${1#$PREFIX/}"
+	pathsplit "$relpath" # sets "parts"
+	hashref_abs="$PREFIX"
+	clearref=""    
+	for i in "${parts[@]}"
+	do
+		c=$(gpg2 -d $GPG_OPTS "${hashref_abs}/$i/$i")
+		if [[ -z $clearref ]]
+		then
+			clearref="$c"
+		else
+			clearref="$clearref/$c"
+		fi
+		hashref_abs="$hashref_abs/$i"
+	done
+	echo "$clearref"
+}
+
+clearpath2() {
+	p="^(.*)($PREFIX/.*)$"
+	while read line
+	do
+		if [[ "$line" =~ $p ]]
+		then
+			d=$(ref2name "${BASH_REMATCH[2]}")
+			b="$(basename "$d")"
+			echo "${BASH_REMATCH[1]}""$b"
+		else
+			echo "$line"
+		fi
+	done
+}
 
 program="$(basename "$0")"
 command="$1"
@@ -154,11 +245,12 @@ case "$command" in
 		gpg_id="$1"
 		mkdir -v -p "$PREFIX"
 		echo "$gpg_id" > "$ID"
+        gpg --armor --gen-random 0 60 > "$SALTFILE"
 		echo "Password store initialized for $gpg_id."
 		git_add_file "$ID" "Set GPG id to $gpg_id."
 
 		if [[ $reencrypt -eq 1 ]]; then
-			find "$PREFIX/" -iname '*.gpg' | while read passfile; do
+			find "$PREFIX/" -type f \( -iname '*.gpg' -or -iname '*.ref' \) | while read passfile; do
 				gpg2 -d $GPG_OPTS "$passfile" | gpg2 -e -r "$gpg_id" -o "$passfile.new" $GPG_OPTS &&
 				mv -v "$passfile.new" "$passfile"
 			done
@@ -190,6 +282,15 @@ else
 fi
 
 case "$command" in
+	cplt)
+		path="$1"
+		ref_path=$(get_refpath "$path")
+		ref_fullpath="$PREFIX/$ref_path"
+		find "$PREFIX"  -type d  -iname '*.ref' | while read passfile; do
+			ref2name "$passfile"
+		done | grep "^$path"
+		;;
+		
 	show|ls|list)
 		clip=0
 
@@ -207,22 +308,25 @@ case "$command" in
 		fi
 
 		path="$1"
+		ref_path=$(get_refpath "$path")
+		ref_fullpath="$PREFIX/$ref_path"
 		passfile="$PREFIX/$path.gpg"
-		if [[ -f $passfile ]]; then
+		ref_passfile=$(get_reffile "$path")
+		if [[ -f $ref_passfile ]]; then
 			if [[ $clip -eq 0 ]]; then
-				exec gpg2 -d $GPG_OPTS "$passfile"
+				exec gpg2 -d $GPG_OPTS "$ref_passfile"
 			else
-				pass="$(gpg2 -d $GPG_OPTS "$passfile" | head -n 1)"
+				pass="$(gpg2 -d $GPG_OPTS "$ref_passfile" | head -n 1)"
 				[[ -n $pass ]] || exit 1
 				clip "$pass" "$path"
 			fi
-		elif [[ -d $PREFIX/$path ]]; then
+		elif [[ -d $ref_fullpath ]]; then
 			if [[ -z $path ]]; then
 				echo "Password Store"
 			else
 				echo "${path%\/}"
 			fi
-			tree -l --noreport "$PREFIX/$path" | tail -n +2 | sed 's/\.gpg$//'
+			tree -A -d -l -f --noreport "$ref_fullpath" | tail -n +2 | clearpath2
 		else
 			echo "$path is not in the password store."
 			exit 1
@@ -248,16 +352,18 @@ case "$command" in
 			exit 1
 		fi
 		path="$1"
+		ref_path=$(get_refpath "$path")
 		passfile="$PREFIX/$path.gpg"
+		ref_passfile=$(get_reffile "$path")
 
-		[[ $force -eq 0 && -e $passfile ]] && yesno "An entry already exists for $path. Overwrite it?"
+		[[ $force -eq 0 && -e "$ref_passfile" ]] && yesno "An entry already exists for $path. Overwrite it?"
 
-		mkdir -p -v "$PREFIX/$(dirname "$path")"
+		make_parent_refs "$path"
 
 		if [[ $multiline -eq 1 ]]; then
 			echo "Enter contents of $path and press Ctrl+D when finished:"
 			echo
-			gpg2 -e -r "$ID" -o "$passfile" $GPG_OPTS
+			gpg2 -e -r "$ID" -o "$ref_passfile" $GPG_OPTS
 		elif [[ $noecho -eq 1 ]]; then
 			while true; do
 				read -r -p "Enter password for $path: " -s password
@@ -265,7 +371,7 @@ case "$command" in
 				read -r -p "Retype password for $path: " -s password_again
 				echo
 				if [[ $password == "$password_again" ]]; then
-					gpg2 -e -r "$ID" -o "$passfile" $GPG_OPTS <<<"$password"
+					gpg2 -e -r "$ID" -o "$ref_passfile" $GPG_OPTS <<<"$password"
 					break
 				else
 					echo "Error: the entered passwords do not match."
@@ -273,9 +379,9 @@ case "$command" in
 			done
 		else
 			read -r -p "Enter password for $path: " -e password
-			gpg2 -e -r "$ID" -o "$passfile" $GPG_OPTS <<<"$password"
+			gpg2 -e -r "$ID" -o "$ref_passfile" $GPG_OPTS <<<"$password"
 		fi
-		git_add_file "$passfile" "Added given password for $path to store."
+		git_add_file "$ref_passfile" "Added given password for $ref_path to store."
 		;;
 	edit)
 		if [[ $# -ne 1 ]]; then
@@ -284,8 +390,10 @@ case "$command" in
 		fi
 
 		path="$1"
-		mkdir -p -v "$PREFIX/$(dirname "$path")"
+		ref_path=$(get_refpath "$path")
 		passfile="$PREFIX/$path.gpg"
+		make_parent_refs "$path"
+		ref_passfile=$(get_reffile "$path")
 		template="$program.XXXXXXXXXXXXX"
 
 		trap 'rm -rf "$tmp_dir" "$tmp_file"' INT TERM EXIT
@@ -294,16 +402,16 @@ case "$command" in
 		tmp_file="$(TMPDIR="$tmp_dir" mktemp -t "$template")"
 
 		action="Added"
-		if [[ -f $passfile ]]; then
-			gpg2 -d -o "$tmp_file" $GPG_OPTS "$passfile" || exit 1
+		if [[ -f $ref_passfile ]]; then
+			gpg2 -d -o "$tmp_file" $GPG_OPTS "$ref_passfile" || exit 1
 			action="Edited"
 		fi
 		${EDITOR:-vi} "$tmp_file"
-		while ! gpg2 -e -r "$ID" -o "$passfile" $GPG_OPTS "$tmp_file"; do
+		while ! gpg2 -e -r "$ID" -o "$ref_passfile" $GPG_OPTS "$tmp_file"; do
 			echo "GPG encryption failed. Retrying."
 			sleep 1
 		done
-		git_add_file "$passfile" "$action password for $path using ${EDITOR:-vi}."
+		git_add_file "$ref_passfile" "$action password for $ref_path using ${EDITOR:-vi}."
 		;;
 	generate)
 		clip=0
@@ -330,15 +438,18 @@ case "$command" in
 			echo "pass-length \"$length\" must be a number."
 			exit 1
 		fi
-		mkdir -p -v "$PREFIX/$(dirname "$path")"
-		passfile="$PREFIX/$path.gpg"
 
-		[[ $force -eq 0 && -e $passfile ]] && yesno "An entry already exists for $path. Overwrite it?"
+		ref_path=$(get_refpath "$path")
+		passfile="$PREFIX/$path.gpg"
+		make_parent_refs "$path"
+		ref_passfile=$(get_reffile "$path")
+
+		[[ $force -eq 0 && -e $ref_passfile ]] && yesno "An entry already exists for $path. Overwrite it?"
 
 		pass="$(pwgen -s $symbols $length 1)"
 		[[ -n $pass ]] || exit 1
-		gpg2 -e -r "$ID" -o "$passfile" $GPG_OPTS <<<"$pass"
-		git_add_file "$passfile" "Added generated password for $path to store."
+		gpg2 -e -r "$ID" -o "$ref_passfile" $GPG_OPTS <<<"$pass"
+		git_add_file "$ref_passfile" "Added generated password for $ref_path to store."
 		
 		if [[ $clip -eq 0 ]]; then
 			echo "The generated password to $path is:"
@@ -364,11 +475,15 @@ case "$command" in
 			exit 1
 		fi
 		path="$1"
+		ref_path=$(get_refpath "$path")
 
 		passfile="$PREFIX/${path%/}"
-		if [[ ! -d $passfile ]]; then
+		ref_passfile=$(get_reffile "${path%/}")
+
+		if [[ ! -d $ref_passfile ]]; then
 			passfile="$PREFIX/$path.gpg"
-			if [[ ! -f $passfile ]]; then
+			ref_passfile=$(get_reffile "$path")
+			if [[ ! -f $ref_passfile ]]; then
 				echo "$path is not in the password store."
 				exit 1
 			fi
@@ -376,10 +491,10 @@ case "$command" in
 
 		[[ $force -eq 1 ]] || yesno "Are you sure you would like to delete $path?"
 
-		rm $recursive -f -v "$passfile"
-		if [[ -d $GIT_DIR && ! -e $passfile ]]; then
-			git rm -qr "$passfile"
-			git commit -m "Removed $path from store."
+		rm $recursive -f -v "$ref_passfile"
+		if [[ -d $GIT_DIR && ! -e $ref_passfile ]]; then
+			git rm -qr "$ref_passfile"
+			git commit -m "Removed $ref_path from store."
 		fi
 		;;
 	git)
